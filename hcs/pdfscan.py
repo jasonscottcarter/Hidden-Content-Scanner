@@ -6,7 +6,8 @@ import re
 
 import pymupdf
 
-from .core import (HIGH, MEDIUM, LOW, INFO, WHITE, INVISIBLE_CONTRAST, analyze_text, contrast, hexs, printable_strings)
+from .core import (HIGH, MEDIUM, LOW, INFO, WHITE, INVISIBLE_CONTRAST, analyze_text, contrast, hexs, printable_strings,
+                   current_budget)
 
 pymupdf.TOOLS.mupdf_display_errors(False)
 
@@ -116,6 +117,7 @@ def _attachments(doc, report, nested):
             data = doc.embfile_get(n)
         except Exception:
             continue
+        current_budget().charge(len(data), f"attachment {n}")
         fname = info.get("filename") or n
         report.add(MEDIUM, "Embedded file attachment", f"attachment '{fname}'",
                    f"PDF carries an attached file ({len(data):,} bytes) - scanned recursively below.")
@@ -139,7 +141,9 @@ def _objects(doc, report):
             try:
                 kind, val = doc.xref_get_key(x, "JS")
                 if kind == "xref":
-                    val = doc.xref_stream(int(val.split()[0])).decode("latin-1", "replace")
+                    raw_js = doc.xref_stream(int(val.split()[0]))
+                    current_budget().charge(len(raw_js), f"JavaScript stream {val}")
+                    val = raw_js.decode("latin-1", "replace")
                 js_snips.append(val)
             except Exception:
                 pass
@@ -189,6 +193,7 @@ def _objects(doc, report):
                         s = doc.xref_stream(x)
                     except Exception:
                         continue
+                    current_budget().charge(len(s), f"orphaned object {x}")
                     texts += re.findall(r"\(((?:[^()\\]|\\.){3,})\)\s*Tj", s.decode("latin-1", "replace"))
             report.add(MEDIUM if texts else LOW, "Orphaned objects", "file structure",
                        f"{len(orphans)} object(s) are stored but not reachable from the document - viewers never display them.",
@@ -317,6 +322,7 @@ def _page(doc, page, pno, report, hidden_layers, nested):
             if atype == "FileAttachment":
                 try:
                     data = annot.get_file()
+                    current_budget().charge(len(data), "attachment annotation")
                     fname = annot.file_info.get("filename", "attachment")
                     report.add(MEDIUM, "Attached file annotation", label, f"File '{fname}' attached via annotation.")
                     nested(fname, data)

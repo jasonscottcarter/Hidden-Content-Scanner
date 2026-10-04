@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest
+# used by tests/make_samples.py and tests/make_clean.py to build fixture documents
+python-docx
+openpyxl
+python-pptx

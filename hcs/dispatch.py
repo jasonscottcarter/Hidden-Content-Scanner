@@ -7,7 +7,8 @@ import re
 import traceback
 import zipfile
 
-from .core import Report, HIGH, MEDIUM, LOW, INFO, analyze_text, check_image_trailer, printable_strings
+from .core import (Report, HIGH, MEDIUM, LOW, INFO, analyze_text, check_image_trailer, printable_strings,
+                   read_zip_member, new_budget, BudgetExceeded)
 
 MAX_DEPTH = 4
 MAX_FILE = 500 * 1024 * 1024
@@ -33,7 +34,8 @@ def detect(name, raw):
             names = z.namelist()
             if "[Content_Types].xml" in names:
                 return "ooxml"
-            if "mimetype" in names and z.read("mimetype").startswith(b"application/vnd.oasis.opendocument"):
+            if "mimetype" in names and z.getinfo("mimetype").file_size < 200 and \
+                    z.read("mimetype").startswith(b"application/vnd.oasis.opendocument"):
                 return "odf"
             return "zip"
         except zipfile.BadZipFile:
@@ -106,8 +108,8 @@ def scan_bytes(name, raw, depth=0, path=None):
             check_zip_container(rep, raw, "archive")
             z = zipfile.ZipFile(io.BytesIO(raw))
             for i in z.infolist()[:200]:
-                if not i.is_dir() and i.file_size < MAX_FILE and not i.flag_bits & 1:
-                    nested(i.filename, z.read(i))
+                if not i.is_dir() and not i.flag_bits & 1:
+                    nested(i.filename, read_zip_member(z, i))
         elif kind == "image":
             rep.file_type = "Image"
             extra = check_image_trailer(rep, raw, "image")
@@ -122,12 +124,16 @@ def scan_bytes(name, raw, depth=0, path=None):
             analyze_text(rep, "\n".join(strs), "embedded strings")
             if depth == 0:
                 rep.add(INFO, "Unsupported file type", "file", "Only generic string checks were performed.")
+    except BudgetExceeded as e:
+        rep.add(HIGH, "Decompression limit exceeded", "file",
+                f"Scanning stopped: {e}. Legitimate documents rarely expand this much - possible decompression bomb.")
     except Exception as e:
         rep.error(f"Scanner crashed: {e}\n{traceback.format_exc(limit=3)}")
     return rep
 
 
-def scan_path(path, check_ads=True, check_slack=False):
+def scan_path(path, check_ads=True):
+    """Scan one file. Disk-slack checks are separate (see ntfs.collect_slack) so parsing never needs admin."""
     size = os.path.getsize(path)
     if size > MAX_FILE:
         rep = Report(path)
@@ -135,6 +141,7 @@ def scan_path(path, check_ads=True, check_slack=False):
         return rep
     with open(path, "rb") as f:
         raw = f.read()
+    new_budget()
     rep = scan_bytes(os.path.basename(path), raw, 0, path)
     rep.path = path
     if check_ads:
@@ -146,9 +153,6 @@ def scan_path(path, check_ads=True, check_slack=False):
             scan_ads(path, rep, nested)
         except Exception as e:
             rep.error(f"ADS check failed: {e}")
-    if check_slack:
-        from .ntfs import scan_slack
-        scan_slack(path, rep)
     return rep
 
 

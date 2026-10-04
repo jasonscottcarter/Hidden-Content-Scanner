@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import re
 import unicodedata
 from dataclasses import dataclass, field, asdict
@@ -96,7 +97,14 @@ ZERO_WIDTH = {
     0xFFA0: "HALFWIDTH HANGUL FILLER",
     0x034F: "COMBINING GRAPHEME JOINER",
     0x00AD: "SOFT HYPHEN",
+    0x180B: "MONGOLIAN FREE VARIATION SELECTOR ONE",
+    0x180C: "MONGOLIAN FREE VARIATION SELECTOR TWO",
+    0x180D: "MONGOLIAN FREE VARIATION SELECTOR THREE",
+    0xFFF9: "INTERLINEAR ANNOTATION ANCHOR",
+    0xFFFA: "INTERLINEAR ANNOTATION SEPARATOR",
+    0xFFFB: "INTERLINEAR ANNOTATION TERMINATOR",
 }
+ZERO_WIDTH.update({cp: "INVISIBLE MUSICAL FORMATTING CHARACTER" for cp in range(0x1D173, 0x1D17B)})
 BIDI = set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A)) | {0x200E, 0x200F, 0x061C}
 
 INJECTION_PATTERNS = [
@@ -230,7 +238,7 @@ def analyze_text(report: Report, text: str, location: str, hidden: bool = False,
         _injection_scan(report, dec, where + " [decoded variation selectors]", hidden=True)
 
     # Zero-width / invisible characters
-    zw = [c for c in text if ord(c) in ZERO_WIDTH and not (ord(c) == 0xFEFF and text.index(c) == 0)]
+    zw = [c for i, c in enumerate(text) if ord(c) in ZERO_WIDTH and not (ord(c) == 0xFEFF and i == 0)]
     zw = [c for c in zw if ord(c) != 0x00AD]  # soft hyphens counted separately
     if zw:
         counts = {}
@@ -289,26 +297,72 @@ def analyze_text(report: Report, text: str, location: str, hidden: bool = False,
             _injection_scan(report, s, where + " [decoded base64]", hidden=True)
 
 
-def _injection_scan(report, text, where, hidden):
-    norm = strip_invisible(text)
+def _pattern_hits(text):
     hits = []
     for rx, desc in _INJ:
-        m = rx.search(norm)
+        m = rx.search(text)
         if m:
-            s, e = max(0, m.start() - 80), min(len(norm), m.end() + 120)
-            hits.append((desc, norm[s:e]))
+            s, e = max(0, m.start() - 80), min(len(text), m.end() + 120)
+            hits.append((desc, text[s:e]))
+    return hits
+
+
+def _injection_scan(report, text, where, hidden):
+    plain = strip_invisible(text)
+    hits = _pattern_hits(plain)
+    obfuscated = False
+    if not hits:
+        # An LLM reads fullwidth, look-alike and letter-spaced text as ordinary words; match it the same way.
+        norm = collapse_letter_spacing(normalize_for_match(text))
+        hits = _pattern_hits(norm)
+        squashed = [p for run in _SPACED_RUN.findall(normalize_for_match(text))
+                    for p in SQUASHED_PHRASES if p in re.sub(r"[\W_]", "", run).lower()]
+        if squashed:
+            hits.append(("Letter-spaced instruction phrase", f"'{squashed[0]}' spelled out with spaces between letters"))
+        obfuscated = bool(hits)
     if not hits:
         return
-    sev = HIGH if hidden or len(hits) >= 2 else MEDIUM
+    sev = HIGH if hidden or obfuscated or len(hits) >= 2 else MEDIUM
     descs = "; ".join(dict.fromkeys(d for d, _ in hits))
     report.add(sev, "Possible AI prompt injection", where,
-               ("HIDDEN text " if hidden else "Text ") + f"matches prompt-injection patterns: {descs}",
+               ("HIDDEN text " if hidden else "Text ") + f"matches prompt-injection patterns: {descs}"
+               + (" - disguised with fullwidth, look-alike or letter-spaced characters" if obfuscated else ""),
                hits[0][1])
 
 
 def strip_invisible(s: str) -> str:
     return "".join(c for c in s if not (ord(c) in ZERO_WIDTH or ord(c) in BIDI or 0xE0000 <= ord(c) <= 0xE01EF
                                          or 0xFE00 <= ord(c) <= 0xFE0F))
+
+
+# Cyrillic and Greek letters that look like Latin ones (the common subset of Unicode's confusables list)
+CONFUSABLES = str.maketrans({
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s",
+    "ԁ": "d", "һ": "h", "ӏ": "l", "ԛ": "q", "ԝ": "w", "ь": "b", "А": "A", "В": "B", "Е": "E", "К": "K",
+    "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X", "У": "Y", "І": "I", "Ј": "J",
+    "Ѕ": "S", "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W",
+    "α": "a", "ο": "o", "ν": "v", "ι": "i", "κ": "k", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "ε": "e",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O",
+    "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+})
+
+
+def normalize_for_match(s: str) -> str:
+    """Fold fullwidth/stylized (NFKC) and Cyrillic/Greek look-alike letters to plain Latin, minus invisibles."""
+    return unicodedata.normalize("NFKC", strip_invisible(s)).translate(CONFUSABLES)
+
+
+_SPACED_WORD = re.compile(r"(?<!\w)(?:\w[ .\-_·*]){3,}\w(?!\w)")
+_SPACED_RUN = re.compile(r"(?<!\w)\w(?:[\s.\-_·*]{1,3}\w(?!\w)){7,}")
+SQUASHED_PHRASES = ("ignoreallpreviousinstructions", "ignorepreviousinstructions", "ignoreallpriorinstructions",
+                    "ignorepriorinstructions", "disregardpreviousinstructions", "disregardallpreviousinstructions",
+                    "forgetallpreviousinstructions", "forgetpreviousinstructions", "ignoretheaboveinstructions",
+                    "ignoreallinstructions", "systemprompt", "youarenowan", "developermode", "jailbreak")
+
+
+def collapse_letter_spacing(s: str) -> str:
+    """Turn 'I g n o r e  a l l' into 'Ignore all' (single letters joined; wider gaps stay word breaks)."""
+    return _SPACED_WORD.sub(lambda m: re.sub(r"[ .\-_·*]", "", m.group(0)), s)
 
 
 # --------------------------------------------------------------------------------------
@@ -360,6 +414,67 @@ def hexs(rgb):
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 INVISIBLE_CONTRAST = 1.5  # below this ratio text is effectively invisible against its background
+
+
+# --------------------------------------------------------------------------------------
+# Decompression budget (zip bombs, nested archives)
+# --------------------------------------------------------------------------------------
+
+MAX_PART_BYTES = 256 * 1024 * 1024  # largest single decompressed part / stream
+MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # everything decompressed while scanning one top-level file
+
+
+class BudgetExceeded(BaseException):
+    """Aborts the current scan. A BaseException (like KeyboardInterrupt) so parsers' `except Exception`
+    handlers can't swallow it; dispatch.scan_bytes reports it."""
+
+
+class Budget:
+    def __init__(self, limit=None):
+        self.limit = MAX_TOTAL_BYTES if limit is None else limit
+        self.used = 0
+
+    def charge(self, n, what):
+        if n > MAX_PART_BYTES:
+            raise BudgetExceeded(f"'{what}' expands to {n:,} bytes (single-part limit {MAX_PART_BYTES:,})")
+        if self.used + n > self.limit:
+            raise BudgetExceeded(f"'{what}' would push decompressed data past {self.limit:,} bytes "
+                                 f"({self.used:,} already used)")
+        self.used += n
+
+
+_budget = contextvars.ContextVar("hcs_budget", default=None)
+
+
+def current_budget():
+    b = _budget.get()
+    if b is None:
+        b = Budget()
+        _budget.set(b)
+    return b
+
+
+def new_budget(limit=None):
+    """Start a fresh budget for one top-level scan (per thread/context)."""
+    b = Budget(limit)
+    _budget.set(b)
+    return b
+
+
+def read_zip_member(z, member):
+    """Read a ZIP entry after charging its declared size to the budget; never returns more than declared."""
+    info = member if hasattr(member, "file_size") else z.getinfo(member)
+    current_budget().charge(info.file_size, info.filename)
+    with z.open(info) as f:
+        data = f.read(info.file_size + 1)
+    if len(data) > info.file_size:
+        raise BudgetExceeded(f"'{info.filename}' is larger than its declared size")
+    return data
+
+
+def read_ole_stream(ole, path):
+    current_budget().charge(ole.get_size(path), str(path))
+    return ole.openstream(path).read()
 
 
 # --------------------------------------------------------------------------------------

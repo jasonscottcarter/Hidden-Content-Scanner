@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hcs import __version__
 from hcs.core import visible_repr
 from hcs.dispatch import scan_path, expand_paths, SUPPORTED_EXT
-from hcs.ntfs import is_admin, relaunch_as_admin
+from hcs.ntfs import is_admin, collect_slack, report_slack
 from hcs.report_export import to_html
 
 try:
@@ -50,7 +50,8 @@ class App:
         self.results = queue.Queue()
         self.pending = 0
         self.batch_total = 0
-        self.var_slack = tk.BooleanVar(value=is_admin())
+        self.slack_busy = False
+        self.var_slack = tk.BooleanVar(value=False)
         self.var_ads = tk.BooleanVar(value=True)
         self.var_info = tk.BooleanVar(value=True)
         self.var_all = tk.BooleanVar(value=False)
@@ -157,6 +158,7 @@ class App:
         self.detail.tag_configure("h", font=("Segoe UI Semibold", 11))
         self.detail.tag_configure("muted", foreground="#5d6675")
         self.detail.tag_configure("snip", background="#fff7e0")
+        self.detail.tag_configure("warn", foreground=SEV_FG["HIGH"])
         self.detail.pack(side="left", fill="both", expand=True)
         dys.pack(side="right", fill="y")
         right.add(fbot, weight=2)
@@ -169,13 +171,16 @@ class App:
         self._set_detail(self._welcome())
 
     def _welcome(self):
+        admin_warning = [("\n\nThis window is running as Administrator, so documents are parsed with admin rights. "
+                          "Running it normally is safer - the slack check still works.", "warn")] if is_admin() else []
         return [("Drop files or folders onto the box above, or use Browse.\n\n", "h"),
                 ("Supported: Word (.docx/.docm/.doc/.rtf), Excel (.xlsx/.xlsm/.xls), PowerPoint (.pptx/.ppt), PDF, "
                  "email (.eml/.msg/.mht), text (.txt/.csv/.md/.html/.xml/.json), OpenDocument (.odt/.ods/.odp). "
                  "Attachments and embedded files are opened and scanned recursively.\n\n", ""),
                 ("Files are only read - nothing is modified, uploaded or executed.\n\n", "muted"),
                 ("File slack: reading the unused tail of a file's last disk cluster needs Administrator rights. "
-                 "Tick 'File slack (admin)' to restart elevated.", "muted")]
+                 "Tick 'File slack (admin)' and Windows will ask for permission for a small disk-reading helper only; "
+                 "documents are still parsed with your normal rights.", "muted")] + admin_warning
 
     def _draw_drop(self, e=None):
         c = self.drop
@@ -201,12 +206,10 @@ class App:
 
     def _slack_toggled(self):
         if self.var_slack.get() and not is_admin():
-            if messagebox.askyesno("Administrator required",
-                                   "Reading file slack requires raw disk access.\n\nRestart the scanner as Administrator now?"):
-                if relaunch_as_admin():
-                    self.root.destroy()
-                    return
-            self.var_slack.set(False)
+            messagebox.showinfo("Administrator permission",
+                                "Reading file slack needs raw disk access.\n\nAfter each scan Windows will ask once for "
+                                "Administrator permission. Only a small disk-reading helper runs elevated - the "
+                                "documents themselves are still opened with your normal rights.")
 
     def _file_menu(self, e):
         iid = self.files.identify_row(e.y)
@@ -252,7 +255,7 @@ class App:
             self.batch_total = 0
             self.pb["value"] = 0
         for f in files:
-            self.jobs.put((f, self.var_ads.get(), self.var_slack.get() and is_admin()))
+            self.jobs.put((f, self.var_ads.get(), self.var_slack.get()))
         self.pending += len(files)
         self.batch_total += len(files)
         self.pb.configure(maximum=self.batch_total)
@@ -286,28 +289,47 @@ class App:
 
     # ------------------------------------------------------------------ worker
     def _worker(self):
+        slack_paths = []
         while True:
             path, ads, slack = self.jobs.get()
             try:
-                rep = scan_path(path, check_ads=ads, check_slack=slack)
+                rep = scan_path(path, check_ads=ads)  # parsing always runs with normal user rights
             except Exception as e:
                 from hcs.core import Report
                 rep = Report(path)
                 rep.error(f"Scan failed: {e}")
-            self.results.put(rep)
+            self.results.put(("report", rep))
+            if slack:
+                slack_paths.append(path)
+            if slack_paths and self.jobs.empty():
+                # One elevated helper (one UAC prompt) reads raw slack for the whole batch.
+                self.results.put(("slack_start", len(slack_paths)))
+                self.results.put(("slack", collect_slack(slack_paths)))
+                slack_paths = []
 
     def _poll(self):
         try:
             while True:
-                rep = self.results.get_nowait()
-                self.pending -= 1
-                self.pb["value"] = self.pb["value"] + 1
-                self._add_report(rep)
+                kind, payload = self.results.get_nowait()
+                if kind == "report":
+                    self.pending -= 1
+                    self.pb["value"] = self.pb["value"] + 1
+                    self._add_report(payload)
+                elif kind == "slack_start":
+                    self.slack_busy = True
+                    self.status.configure(text=f"Approve the Windows prompt to check disk slack for {payload} file(s)…")
+                else:
+                    self.slack_busy = False
+                    for rep in self.top_reports:
+                        info = payload.get(os.path.abspath(rep.path))
+                        if info:
+                            report_slack(rep, info)
+                    self._rebuild_tree()
         except queue.Empty:
             pass
-        if self.pending > 0:
+        if self.pending > 0 and not self.slack_busy:
             self.status.configure(text=f"Scanning… {self.pending} remaining")
-        elif self.top_reports:
+        elif self.top_reports and not self.slack_busy:
             bad = sum(1 for r in self.top_reports if r.counts()["HIGH"])
             self.status.configure(text=f"Done · {len(self.top_reports)} file(s) · {bad} with HIGH findings")
         self.root.after(100, self._poll)
@@ -321,6 +343,17 @@ class App:
         if rep.errors and not rep.findings:
             return "Partial", "err"
         return "Clean", "ok"
+
+    def _rebuild_tree(self):
+        sel = self.files.selection()
+        selected = self.reports[sel[0]].path if sel and sel[0] in self.reports else None
+        self.files.delete(*self.files.get_children())
+        self.reports.clear()
+        for rep in self.top_reports:
+            iid = self._insert("", rep, os.path.basename(rep.path))
+            if rep.path == selected:
+                self.files.selection_set(iid)
+        self._refresh_findings()
 
     def _insert(self, parent, rep, label):
         v, tag = self._verdict(rep)

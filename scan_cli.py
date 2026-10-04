@@ -1,9 +1,11 @@
 """Command-line interface:  python scan_cli.py <files/folders...> [--json out.json] [--html out.html] [--slack]"""
 import argparse
 import json
+import os
 import sys
 
 from hcs.dispatch import scan_path, expand_paths
+from hcs.ntfs import collect_slack, report_slack
 from hcs.report_export import to_html
 
 
@@ -25,10 +27,16 @@ def main():
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--json")
     ap.add_argument("--html")
-    ap.add_argument("--slack", action="store_true", help="check NTFS file slack (needs admin)")
+    ap.add_argument("--slack", action="store_true",
+                    help="check NTFS file slack (prompts once for Administrator permission for a disk-reading helper)")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    reports = [scan_path(p, check_slack=a.slack) for p in expand_paths(a.paths)]
+    paths = expand_paths(a.paths)
+    reports = [scan_path(p) for p in paths]
+    if a.slack:  # raw disk reads happen in a separate elevated helper; parsing above stayed unprivileged
+        infos = collect_slack(paths)
+        for r in reports:
+            report_slack(r, infos.get(os.path.abspath(r.path)))
     for r in reports:
         show(r)
     if a.json:

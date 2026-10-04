@@ -6,7 +6,7 @@ import struct
 
 import olefile
 
-from .core import HIGH, MEDIUM, LOW, INFO, analyze_text, printable_strings
+from .core import HIGH, MEDIUM, LOW, INFO, analyze_text, printable_strings, read_ole_stream
 
 DANGEROUS = (".exe", ".dll", ".scr", ".js", ".jse", ".vbs", ".vbe", ".ps1", ".bat", ".cmd", ".hta", ".lnk",
              ".msi", ".jar", ".wsf", ".cpl", ".com", ".pif")
@@ -76,7 +76,7 @@ KNOWN_STREAMS = {
 
 def word97_text(ole):
     """Extract the full text of a Word 97-2003 document via the piece table."""
-    wd = ole.openstream("WordDocument").read()
+    wd = read_ole_stream(ole, "WordDocument")
     if len(wd) < 426 or struct.unpack("<H", wd[:2])[0] != 0xA5EC:
         return None
     flags = struct.unpack("<H", wd[0x0A:0x0C])[0]
@@ -85,7 +85,7 @@ def word97_text(ole):
     table_name = "1Table" if flags & 0x0200 else "0Table"
     if not ole.exists(table_name):
         return None
-    tbl = ole.openstream(table_name).read()
+    tbl = read_ole_stream(ole, table_name)
     fc_clx, lcb_clx = struct.unpack("<II", wd[418:426])
     clx = tbl[fc_clx:fc_clx + lcb_clx]
     i = 0
@@ -111,7 +111,7 @@ def word97_text(ole):
 
 
 def ppt97_text(ole):
-    data = ole.openstream("PowerPoint Document").read()
+    data = read_ole_stream(ole, "PowerPoint Document")
     out, pos, n = [], 0, len(data)
     while pos + 8 <= n:
         ver_inst, rtype, rlen = struct.unpack("<HHI", data[pos:pos + 8])
@@ -133,7 +133,7 @@ def xls_sheets(ole):
     name = "Workbook" if ole.exists("Workbook") else ("Book" if ole.exists("Book") else None)
     if not name:
         return [], False
-    data = ole.openstream(name).read()
+    data = read_ole_stream(ole, name)
     sheets, pos, encrypted = [], 0, False
     while pos + 4 <= len(data):
         rid, ln = struct.unpack("<HH", data[pos:pos + 4])
@@ -205,7 +205,7 @@ def scan_ole(raw, report, nested, ext=""):
         if "WordDocument" in tops:
             txt = word97_text(ole)
             if txt is None:
-                txt = "\n".join(printable_strings(ole.openstream("WordDocument").read(), min_len=8, limit=4000))
+                txt = "\n".join(printable_strings(read_ole_stream(ole, "WordDocument"), min_len=8, limit=4000))
             analyze_text(report, txt, "document text")
             report.add(INFO, "Limited analysis", "file",
                        "Legacy .doc formatting (white/hidden/tiny text) can't be fully evaluated; save as .docx and rescan for a complete check. "
@@ -226,7 +226,7 @@ def scan_ole(raw, report, nested, ext=""):
                     report.add(HIGH, "Very hidden sheet", f"Sheet '{name}'", "Sheet is 'very hidden' (cannot be unhidden from Excel's menus).")
                 elif state == 1:
                     report.add(MEDIUM, "Hidden sheet", f"Sheet '{name}'", "Sheet is hidden.")
-            wb = ole.openstream("Workbook" if ole.exists("Workbook") else "Book").read()
+            wb = read_ole_stream(ole, "Workbook" if ole.exists("Workbook") else "Book")
             analyze_text(report, "\n".join(printable_strings(wb, min_len=6, limit=5000)), "workbook strings")
             report.add(INFO, "Limited analysis", "file", "Save as .xlsx and rescan for cell-level hidden-content checks.")
     except Exception as e:
@@ -237,7 +237,7 @@ def scan_ole(raw, report, nested, ext=""):
         last = p.split("/")[-1]
         try:
             if last == "\x01Ole10Native":
-                data = ole.openstream(p).read()
+                data = read_ole_stream(ole, p)
                 fname, payload = "embedded.bin", data
                 try:
                     from oletools.oleobj import OleNativeStream
@@ -250,11 +250,11 @@ def scan_ole(raw, report, nested, ext=""):
                 report.add(sev, "Embedded package", p.replace("\x01", ""), f"Embedded file '{fname}' ({len(payload):,} bytes).")
                 nested(str(fname), payload)
             elif last == "Package":
-                data = ole.openstream(p).read()
+                data = read_ole_stream(ole, p)
                 report.add(MEDIUM, "Embedded document", p, f"Embedded Office document ({len(data):,} bytes).")
                 nested("embedded_package.zip", data)
             elif last in ("CONTENTS", "Contents") and p.startswith(("ObjectPool", "MBD")):
-                data = ole.openstream(p).read()
+                data = read_ole_stream(ole, p)
                 if data[:4] == b"%PDF":
                     nested("embedded.pdf", data)
         except Exception as e:

@@ -5,7 +5,8 @@ import io
 import re
 import zipfile
 
-from .core import HIGH, MEDIUM, LOW, INFO, WHITE, INVISIBLE_CONTRAST, analyze_text, contrast, hexs, parse_hex
+from .core import (HIGH, MEDIUM, LOW, INFO, WHITE, INVISIBLE_CONTRAST, analyze_text, contrast, hexs, parse_hex,
+                   read_zip_member)
 from .xmlutil import local, att, parse_xml, UnsafeXml
 
 
@@ -46,7 +47,7 @@ def scan_odf(raw, report, nested):
     check_zip_container(report, raw, "OpenDocument package")
     z = zipfile.ZipFile(io.BytesIO(raw))
     names = z.namelist()
-    mt = z.read("mimetype").decode("ascii", "replace") if "mimetype" in names else ""
+    mt = read_zip_member(z, "mimetype").decode("ascii", "replace") if "mimetype" in names else ""
     report.file_type = {"text": "OpenDocument Text", "spreadsheet": "OpenDocument Spreadsheet",
                         "presentation": "OpenDocument Presentation"}.get(mt.rsplit(".", 1)[-1], "OpenDocument")
 
@@ -58,13 +59,13 @@ def scan_odf(raw, report, nested):
         report.add(MEDIUM, "Embedded objects", "package", f"{len(objs)} embedded object(s).", ", ".join(objs))
     for n in names:
         if n.startswith("ObjectReplacements/") or n.lower().endswith((".bin", ".ole")):
-            nested(n.rsplit("/", 1)[-1], z.read(n))
+            nested(n.rsplit("/", 1)[-1], read_zip_member(z, n))
 
     def load(n):
         if n not in names:
             return None
         try:
-            return parse_xml(z.read(n))
+            return parse_xml(read_zip_member(z, n))
         except UnsafeXml as e:
             report.add(HIGH, "Malicious XML construct", n, f"DTD/entity declarations ({e}); part not parsed.")
             return None

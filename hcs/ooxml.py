@@ -10,7 +10,7 @@ from collections import namedtuple
 from urllib.parse import unquote
 
 from .core import (HIGH, MEDIUM, LOW, INFO, WHITE, INVISIBLE_CONTRAST, analyze_text, contrast, hexs, parse_hex,
-                   check_image_trailer, printable_strings, clip)
+                   check_image_trailer, printable_strings, clip, read_zip_member)
 from .xmlutil import (local, kid, kids, descs, chain, att, rid, onoff, to_int, parse_xml, texts, Theme, dml_color,
                       WORD_HIGHLIGHT, EXCEL_INDEXED, UnsafeXml)
 from . import htmlscan
@@ -109,16 +109,26 @@ class Package:
         self.lower = {n.lower(): n for n in self.names}
         self._xml = {}
         self._rels = {}
+        self._read_once = set()
         self.handled = set()
 
     def resolve(self, n):
         return n if n in self.nameset else self.lower.get(n.lower(), n)
 
     def read(self, n):
+        n = self.resolve(n)
+        if n not in self.nameset:
+            return b""
+        if n in self._read_once:  # already charged to the budget; parts are re-read by several checks
+            info = self.z.getinfo(n)
+            with self.z.open(info) as f:
+                return f.read(info.file_size)
         try:
-            return self.z.read(self.resolve(n))
+            data = read_zip_member(self.z, n)
         except Exception:
             return b""
+        self._read_once.add(n)
+        return data
 
     def xml(self, n):
         if not n:

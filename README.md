@@ -21,7 +21,7 @@ Word (.docx/.docm/.dotx, .doc, .rtf), Excel (.xlsx/.xlsm, .xls), PowerPoint (.pp
 | PDF | Invisible render mode, white, tiny or transparent text, text covered by shapes or images, off-page text, hidden layers, JavaScript, Launch actions, attachments, hidden annotations, orphaned objects, text deleted in earlier revisions |
 | Email | Hidden HTML (display:none, white, zero-size, off-screen), plain-text vs HTML part mismatch, HTML comments, tracking pixels, deceptive links, header anomalies, attachments |
 | Containers | Data appended to or prepended before the file, hidden gaps between ZIP entries, orphaned package parts, ZIP comments, data appended to images, unallocated OLE sectors (internal "slack"), XXE/entity-bomb XML |
-| Windows | NTFS alternate data streams (and the Mark of the Web download source), plus **disk file slack**, which requires Administrator rights (the GUI offers to restart elevated) |
+| Windows | NTFS alternate data streams (and the Mark of the Web download source), plus **disk file slack**, which requires Administrator rights (the GUI offers to restart elevated) OR RUN-AS Admin initally |
 
 ## Limitations
 - Prompt-injection detection is pattern-based. Novel wording can evade it, and benign text can occasionally match.

@@ -29,5 +29,8 @@ Word (.docx/.docm/.dotx, .doc, .rtf), Excel (.xlsx/.xlsm, .xls), PowerPoint (.pp
 - Pixel-level image steganography and custom-font glyph remapping are not detected.
 - Disk file slack belongs to *this* disk. It shows leftovers or hidden data on your drive, and it does not travel with copies of the file.
 
+## License
+MIT. See [LICENSE](LICENSE).
+
 ## Tests
 `python tests/make_samples.py out_dir` creates booby-trapped samples. `python tests/make_clean.py out_dir` creates legitimate white-on-dark designs that should come back clean.

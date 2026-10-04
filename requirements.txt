@@ -1,0 +1,6 @@
+tkinterdnd2
+olefile
+oletools
+extract-msg
+pymupdf
+defusedxml
